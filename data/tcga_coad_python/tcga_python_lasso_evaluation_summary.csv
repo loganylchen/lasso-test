@@ -1,0 +1,10 @@
+"Metric","Value"
+"AUC",1
+"Accuracy",1
+"Sensitivity",1
+"Specificity",1
+"N_Biomarkers",12
+"N_Samples",37
+"N_Features",500
+"N_Normal",8
+"N_Tumor",29

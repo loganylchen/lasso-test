@@ -1,0 +1,371 @@
+---
+title: "LASSO Biomarker筛选教程"
+author: "生物信息学团队"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+# 1. 简介
+
+本教程演示如何使用LASSO回归从RNA-seq位点数据中筛选生物标志物（biomarker），用于区分正常和疾病样本。
+
+## 1.1 LASSO回归简介
+
+LASSO（Least Absolute Shrinkage and Selection Operator）是一种正则化线性回归方法，通过L1惩罚项实现特征选择。
+
+**优势**：
+- 自动进行特征选择（系数收缩到0）
+- 适合高维数据（特征数 >> 样本数）
+- 提高模型可解释性
+
+## 1.2 分析流程
+
+1. 数据加载与预处理
+2. LASSO交叉验证选择最优λ
+3. Biomarker筛选
+4. 模型评估
+5. 结果可视化
+
+---
+
+# 2. 环境准备
+
+```{r libraries}
+# 加载必要的包
+library(glmnet)    # LASSO回归
+library(ggplot2)   # 可视化
+library(pROC)      # ROC曲线
+library(pheatmap)  # 热图
+library(caret)     # 混淆矩阵
+
+# 加载自定义函数
+source("../R/lasso_biomarker.R")
+source("../R/visualization.R")
+source("../R/evaluation.R")
+source("../data/generate_data.R")
+```
+
+---
+
+# 3. 数据准备
+
+## 3.1 生成示例数据
+
+```{r generate_data}
+# 生成示例数据
+# 20个样本（10正常 + 10疾病）
+# 500个RNA修饰位点
+# 其中20个是真实的biomarker
+set.seed(42)
+data <- generate_example_data(
+  n_samples = 20,
+  n_features = 500,
+  n_informative = 20,
+  seed = 42
+)
+
+# 查看数据结构
+cat("样本数:", length(data$y), "\n")
+cat("特征数:", nrow(data$X), "\n")
+cat("真实biomarker数:", length(data$true_features), "\n")
+cat("\n标签分布:\n")
+table(data$y)
+```
+
+## 3.2 数据可视化
+
+```{r data_overview, fig.height=4}
+# 样本分组
+sample_groups <- ifelse(data$y == 0, "Normal", "Disease")
+
+# 绘制部分数据的箱线图
+selected_features <- data$true_features[1:6]
+plot_data <- data.frame()
+for (feature in selected_features) {
+  plot_data <- rbind(plot_data, data.frame(
+    Feature = feature,
+    Value = data$X[feature, ],
+    Group = sample_groups
+  ))
+}
+
+ggplot(plot_data, aes(x = Feature, y = Value, fill = Group)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values = c("Normal" = "#4DAF4A", "Disease" = "#E41A1C")) +
+  labs(title = "部分真实Biomarker示例", y = "Expression Level") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+---
+
+# 4. LASSO模型训练
+
+## 4.1 交叉验证选择最优λ
+
+```{r lasso_cv}
+# 运行5折交叉验证
+cv_fit <- run_lasso_cv(
+  X = data$X,
+  y = data$y,
+  nfolds = 5,
+  alpha = 1  # alpha=1表示LASSO
+)
+
+# 查看最优lambda
+cat("λ.min:", round(cv_fit$lambda.min, 6), "\n")
+cat("λ.1se:", round(cv_fit$lambda.1se, 6), "\n")
+```
+
+## 4.2 交叉验证曲线
+
+```{r cv_curve}
+plot_cv_curve(cv_fit)
+```
+
+**解释**：
+- 蓝线：交叉验证AUC随λ变化
+- 红线：λ.min（最大AUC对应的λ）
+- 绿线：λ.1se（1个标准误内的最大λ，更保守）
+
+## 4.3 系数路径图
+
+```{r coef_path}
+plot_coefficient_path(cv_fit)
+```
+
+**解释**：
+- 横轴：log(λ)，从左到右λ增大
+- 纵轴：系数值
+- 每条线代表一个特征
+- 随着λ增大，系数逐渐收缩到0
+
+---
+
+# 5. Biomarker筛选
+
+## 5.1 筛选非零系数特征
+
+```{r select_biomarkers}
+# 使用λ.1se筛选（更保守，特征更少）
+biomarkers <- select_biomarkers(
+  cv_fit = cv_fit,
+  X = data$X,
+  lambda = "lambda.1se"
+)
+
+cat("筛选出的Biomarker数量:", biomarkers$n_features, "\n")
+cat("选中的λ值:", round(biomarkers$lambda, 6), "\n\n")
+
+# 查看选中的biomarker
+cat("选中的Biomarker:\n")
+print(biomarkers$selected_features)
+```
+
+## 5.2 特征重要性排序
+
+```{r feature_importance}
+importance <- calculate_feature_importance(biomarkers)
+head(importance, 10)
+```
+
+## 5.3 验证真实Biomarker召回率
+
+```{r recall}
+# 计算有多少真实biomarker被找到
+true_positives <- sum(biomarkers$selected_features %in% data$true_features)
+recall <- true_positives / length(data$true_features)
+
+cat("真实Biomarker数:", length(data$true_features), "\n")
+cat("成功识别数:", true_positives, "\n")
+cat("召回率:", round(recall * 100, 1), "%\n")
+```
+
+---
+
+# 6. 模型评估
+
+## 6.1 性能指标
+
+```{r evaluate}
+eval_result <- evaluate_model(
+  cv_fit = cv_fit,
+  X = data$X,
+  y = data$y,
+  lambda = "lambda.1se"
+)
+
+cat("AUC:", round(eval_result$auc, 3), "\n")
+cat("准确率:", round(eval_result$accuracy, 3), "\n")
+cat("灵敏度:", round(eval_result$sensitivity, 3), "\n")
+cat("特异度:", round(eval_result$specificity, 3), "\n\n")
+
+cat("混淆矩阵:\n")
+print(eval_result$confusion_matrix)
+```
+
+## 6.2 ROC曲线
+
+```{r roc_curve}
+plot_roc_curve(cv_fit, data$X, data$y, lambda = "lambda.1se")
+```
+
+---
+
+# 7. 结果可视化
+
+## 7.1 Biomarker热图
+
+```{r heatmap, fig.height=8}
+plot_biomarker_heatmap(
+  X = data$X,
+  y = data$y,
+  biomarkers = biomarkers,
+  output_file = "../output/figures/biomarker_heatmap.png"
+)
+```
+
+**解释**：
+- 行：筛选出的biomarker
+- 列：样本（分为Normal和Disease两组）
+- 颜色：表达水平（红=高，蓝=低）
+
+## 7.2 Top Biomarker箱线图
+
+```{r boxplot}
+plot_biomarker_boxplot(
+  X = data$X,
+  y = data$y,
+  biomarkers = biomarkers,
+  top_n = 10
+)
+```
+
+---
+
+# 8. 总结
+
+## 8.1 关键发现
+
+```{r summary}
+cat("=== LASSO Biomarker筛选总结 ===\n\n")
+cat("数据规模:\n")
+cat("  - 样本数:", length(data$y), "（10正常 + 10疾病）\n")
+cat("  - 总特征数:", nrow(data$X), "\n")
+cat("  - 真实biomarker数:", length(data$true_features), "\n\n")
+
+cat("模型性能:\n")
+cat("  - AUC:", round(eval_result$auc, 3), "\n")
+cat("  - 准确率:", round(eval_result$accuracy, 3), "\n\n")
+
+cat("特征筛选:\n")
+cat("  - 筛选出biomarker数:", biomarkers$n_features, "\n")
+cat("  - 真实biomarker召回率:", round(recall * 100, 1), "%\n")
+```
+
+## 8.2 使用建议
+
+**λ选择**：
+- `lambda.min`：AUC最大，特征较多，适合预测
+- `lambda.1se`：更保守，特征较少，适合生物学解释
+
+**样本量要求**：
+- 建议至少30-50个样本
+- 每组至少15-25个样本
+
+**特征预处理**：
+- 标准化（z-score）
+- 去除低方差特征
+- 批次效应校正
+
+---
+
+# 9. 保存结果
+
+```{r save_results}
+# 创建结果目录
+dir.create("../output/results", showWarnings = FALSE, recursive = TRUE)
+
+# 保存biomarker列表
+write.csv(
+  importance,
+  "../output/results/biomarker_importance.csv",
+  row.names = FALSE
+)
+
+# 保存评估结果
+eval_summary <- data.frame(
+  Metric = c("AUC", "Accuracy", "Sensitivity", "Specificity", "N_Biomarkers"),
+  Value = c(
+    eval_result$auc,
+    eval_result$accuracy,
+    eval_result$sensitivity,
+    eval_result$specificity,
+    biomarkers$n_features
+  )
+)
+write.csv(
+  eval_summary,
+  "../output/results/evaluation_summary.csv",
+  row.names = FALSE
+)
+
+# 保存模型
+saveRDS(cv_fit, "../output/results/lasso_model.rds")
+
+cat("✅ 结果已保存到 output/results/ 目录\n")
+```
+
+---
+
+# 10. 进阶应用
+
+## 10.1 新样本预测
+
+```{r predict_new}
+# 模拟新样本
+new_sample <- matrix(rnorm(nrow(data$X)), ncol = 1)
+rownames(new_sample) <- rownames(data$X)
+
+# 预测
+pred_prob <- predict_biomarker(
+  cv_fit = cv_fit,
+  X_new = new_sample,
+  lambda = "lambda.1se",
+  type = "response"
+)
+
+cat("新样本预测概率:", round(pred_prob, 3), "\n")
+cat("预测类别:", ifelse(pred_prob > 0.5, "Disease", "Normal"), "\n")
+```
+
+## 10.2 与其他方法对比
+
+可以尝试：
+- Elastic Net（alpha ∈ (0, 1)）
+- Random Forest特征选择
+- 逐步回归
+- limma + t-test
+
+---
+
+**教程完成！**
+
+如有问题，请参考：
+- glmnet文档：https://glmnet.stanford.edu/
+- LASSO理论：Tibshirani (1996) JRSS-B
